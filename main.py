@@ -54,10 +54,16 @@ async def answer(request: Request):
             messages.append({"role": "user", "content": instruction + content})
 
         chat_response = openai.ChatCompletion.create(model="gpt-3.5-turbo", messages=messages)
+        summary = chat_response['choices'][0]['message']['content']
+        dangerous_level = openai.ChatCompletion.create(model="gpt-3.5-turbo", messages=[
+            {"role": "system", "content": "Based on provided text evaluate the level of making business in given country. Evaluation must be an integer between 1 and 10, where 1 is most secure and 10 is most dangerous. Return only integer evaluation in response and no other text! Don't use any words in response."},
+            {"role": "user", "content": summary}
+        ])
         response.append({
             "country": country,
-            "summary": chat_response['choices'][0]['message']['content'],
-            "links": links
+            "summary": summary,
+            "links": links,
+            "dangerous_level": dangerous_level['choices'][0]['message']['content']
         })
 
     return response
