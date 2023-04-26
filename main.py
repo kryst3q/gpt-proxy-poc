@@ -3,9 +3,12 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 import weaviate
 import openai
+import logging
 from transformers import AutoTokenizer
 import math
 import re
+
+from weaviate import ConsistencyLevel
 
 load_dotenv()
 
@@ -29,7 +32,8 @@ async def answer(request: Request):
     countries = data['countries']
     response = []
     for country in countries:
-        results = client.query.get("FeedItem", ["summary", "link"]).with_ask({"question": "Provide me information about economic situation of " + country}).with_limit(3).do()
+        results = client.query.get("FeedItem", ["summary", "link"]).with_ask(
+            {"question": "Provide me information about economic situation of " + country}).with_limit(3).do()
 
         messages = [
             {"role": "system",
@@ -56,7 +60,8 @@ async def answer(request: Request):
         chat_response = openai.ChatCompletion.create(model="gpt-3.5-turbo", messages=messages)
         summary = chat_response['choices'][0]['message']['content']
         dangerous_level = openai.ChatCompletion.create(model="gpt-3.5-turbo", messages=[
-            {"role": "system", "content": "Based on provided text evaluate the level of making business in given country. Evaluation must be an integer between 1 and 10, where 1 is most secure and 10 is most dangerous. Return only integer evaluation in response and no other text! Don't use any words in response."},
+            {"role": "system",
+             "content": "Based on provided text evaluate the level of making business in given country. Evaluation must be an integer between 1 and 10, where 1 is most secure and 10 is most dangerous. Return only integer evaluation in response and no other text! Don't use any words in response."},
             {"role": "user", "content": summary}
         ])
         response.append({
@@ -67,6 +72,86 @@ async def answer(request: Request):
         })
 
     return response
+
+
+@app.get("/articles")
+async def articles():
+    results = client.query.get("FeedItem", ["title", "content", "summary"]).with_additional(['id']).do()
+    response = []
+
+    print("test", results)
+
+    for result in results["data"]["Get"]["FeedItem"]:
+        response.append({
+            "id": result["_additional"]["id"],
+            "title": result["title"],
+            "content": result["content"],
+            "summary": result["summary"]
+        })
+
+    return response
+
+
+@app.post("/articles")
+async def add_article(request: Request):
+    data = await request.json()
+
+    properties = {
+        'title': data["title"],
+        'content': data["content"],
+        'summary': summarize(data["content"])
+    }
+
+    print(properties)
+
+    try:
+        data_uuid = client.data_object.create(
+            properties,
+            "FeedItem"
+        )
+
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+    return {"status": "ok", "id": data_uuid}
+
+
+@app.put("/articles/{id}")
+async def update_article(id: str, request: Request):
+    data = await request.json()
+
+    properties = {
+        'title': data["title"],
+        'content': data["content"],
+        'summary': summarize(data["content"])
+    }
+
+    try:
+        client.data_object.update(
+            properties,
+            class_name="FeedItem",
+            uuid=id,
+            consistency_level=ConsistencyLevel.ALL
+        )
+
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+    return {"status": "ok"}
+
+
+@app.delete("/articles/{id}")
+async def delete_article(id: str):
+    try:
+        client.data_object.delete(
+            id,
+            class_name="FeedItem",
+            consistency_level=ConsistencyLevel.ALL
+        )
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+    return {"status": "ok"}
 
 
 def split_into_parts(text, num_parts):
@@ -94,3 +179,21 @@ def split_into_parts(text, num_parts):
         parts.append(part)
 
     return parts
+
+
+def summarize(text):
+    content_tokens = len(tokenizer.encode(text))
+    max_tokens = 3097
+
+    if content_tokens > max_tokens:
+        parts_number = math.ceil(content_tokens / max_tokens)
+        text = split_into_parts(text, parts_number)[0]
+
+    response = openai.ChatCompletion.create(model="gpt-3.5-turbo", messages=[
+        {"role": "system",
+         "content": "Your task is to prepare a summary of a text provided by user. The summary is intended to be purely informative. Do not use suggestions, commands or prohibitions. The summary must fit within 280 characters."},
+        {"role": "user",
+         "content": "Provide me a summary of the following text: " + text}
+    ])
+
+    return response['choices'][0]['message']['content']
